@@ -1,0 +1,136 @@
+$emailfrom = "example@site.com"
+$draftrecipient = 'draft@site.com'
+$logfile = 'c:\temp\emaillistsend.txt'
+$excelfile = "c:\temp\emaillist.xlsx"
+$sheetname = "sheet2"
+#specify machine to run script from (due to restrictions of sending mass email from local client)
+$scriptmachine = "machine1"
+$smtpserver = "server"
+$emailsubject = "NOTICE: SERVICE INTERRUPTIONS"
+
+function get-emaillist{
+	$Excel = New-Object -ComObject Excel.Application
+	## open the spreadsheet
+    $source = $excelfile
+	$Workbook = $Excel.Workbooks.Open($source,2,$true)
+	## select the worksheet in excel file
+	$ws = $Workbook.Sheets.Item("$sheetname")
+	## create new PSO for email list
+	$EmailList = @()
+	## Calculate number of used range
+	$UsedRange = $ws.UsedRange
+    ##skip header and add data to PSO
+    $EmailList += $UsedRange.Cells.Item(1,2).EntireColumn.value2 | Select-Object -Skip 1
+    return $EmailList
+    ## close workbook
+    $workbook.close($false)
+    $Excel.Quit()
+}
+function new-composeemail{
+    $title = 'Prompt for Customized Message'
+    $message = 'Do you require customization of the email message?'
+    $yes = New-Object System.Management.Automation.Host.ChoiceDescription "&yes", 'yes?'
+    $no = New-Object System.Management.Automation.Host.ChoiceDescription "&no", 'no?'
+    $cancel = New-Object System.Management.Automation.Host.ChoiceDescription "&cancel", 'no decision at all?'
+    $options = [System.Management.Automation.Host.ChoiceDescription[]]($yes, $no, $cancel)
+    $result = $host.ui.PromptForChoice($title, $message, $options, 0) 
+
+    if ($result-eq 0){
+        $what = (Read-Host -Prompt 'Enter in what will be down')
+        $why = (Read-Host -Prompt 'Enter in reason for outage')
+        # The below text file will be the one containing the server names and descriptions sent to end users
+        }
+    elseif ($result -eq 1){
+        $what = 'SERVERS'
+        $why = 'Monthly Maintenance'
+        }
+    else {
+    read-host "no selection made, press any key and window will close" | Out-Null
+    exit
+        exit}
+
+
+## get date and time from user
+$dateofmaint = Get-Date (Read-Host -Prompt 'Enter the date of the maintenance (ex: 02/07/2017)')
+$timeofmaint = (Read-Host -Prompt 'Enter the time for the maintenance (ex: 0630 to 0730)')
+
+## Outage date / time for email body
+$dday = $($dateofmaint).tostring('dddd, M/d/yyyy')+' -- '+$timeofmaint
+
+##begin email body text
+# This is the first part of the email body up until the outage date / time
+$emlbody =
+	"<html><style>
+	H1
+		{background:yellow;margin-bottom:15.0pt;margin-left:0in;font-size:26.0pt;font-family:'Calibri Light',sans-serif;letter-spacing:.25pt;text-align:center;}
+	Body
+		{margin-top:12.0pt;
+		margin-bottom:12.0pt;
+		font-size:14.0pt;
+		font-family:'Calibri',sans-serif;}
+
+	h2{margin-top:12.0pt;
+		margin-bottom:12.0pt;
+		font-size:18.0pt;
+		font-family:'Calibri',sans-serif;
+	font-weight:bold;
+	color:#ff0000;}	
+
+	</style>
+
+	<H1>Service Interruption</H1>
+	<body>During this time, connectivity will be interrupted.
+	</body>
+
+	<H2>When: $dday</h2>
+	<b>What: </b>$what<br>
+
+	<b>Why: </b>$why<br>
+
+	<b>Questions? </b>Respond to this email<br><br>
+
+	We apologize for any inconvenience.<BR><br>
+	Thank you for your patience.
+	</body>
+	</html>"
+    return $emlbody
+}
+
+$emlbody = new-composeemail
+$creds = Get-Credential -UserName $emailfrom -Message "enter password for $emailfrom"
+
+#first send draft email
+Invoke-Command -ComputerName $scriptmachine -ScriptBlock{
+Clear-Content -path $using:logfile -Force -ErrorAction Ignore
+Add-Content -path $using:logfile -Value "Email function started at $(get-date)" -Force
+Send-MailMessage -Subject "**DRAFT: + $emailsubject" -SmtpServer $smtpserver -Body $using:emlbody -to $using:draftrecipient -From $emailfrom -BodyAsHTML -ea stop -Credential $using:creds
+}
+
+#after draft confirmed..
+$title = 'Confirmation'
+$message = 'Check your inbox for the service email, does it all look correct?'
+$yes = New-Object System.Management.Automation.Host.ChoiceDescription "&yes", 'yes?'
+$no = New-Object System.Management.Automation.Host.ChoiceDescription "&no", 'no?'
+$options = [System.Management.Automation.Host.ChoiceDescription[]]($yes, $no)
+$result = $host.ui.PromptForChoice($title, $message, $options, 0) 
+
+
+## if email draft accpeted, send to email list
+if ($result-eq 0){
+    $emaillist = (get-emaillist)
+    foreach ($emaillist in $emaillist){
+        Invoke-Command -ComputerName $scriptmachine -ScriptBlock{
+            try{
+                Send-MailMessage -Subject $emailsubject -SmtpServer $smtpserver -Body $Using:emlbody -Bcc "$using:emaillist" -From $emailfrom -BodyAsHTML -ea stop -Credential $using:creds
+                }
+            catch{
+                write-host "$using:emaillist - failed"
+                Add-Content -path $using:logfile -Value "$using:emaillist - failed"
+                }
+            }
+        }
+    read-host "email notifications sent, failures are logged above. press enter and window will close, check $logfile for failures." | Out-Null
+}
+else{
+    read-host "email confirmation unsatisfactory, press enter and window will close" | Out-Null
+}
